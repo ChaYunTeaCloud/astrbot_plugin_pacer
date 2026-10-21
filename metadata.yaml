@@ -13,8 +13,11 @@ desc: |
 
   **和 burst 的关系**：装了 burst 时，它会在上一轮还没发出第一段时先排队，
   由本插件的轮次结束回调放行。两个一起用效果最完整。
+
+  **after_message_sent**：由于本插件接管了发送，核心的 `after_message_sent` 钩子
+  会被本插件补齐触发 —— 其它插件注册在该钩子里的收尾/清理逻辑照常执行。
 author: Lansheen3096
-version: 0.2.2
+version: 0.2.3
 repo: https://github.com/Lansheen3096/astrbot_plugin_pacer
 astrbot_version: ">=4.28.2"
 tags:

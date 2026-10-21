@@ -11,6 +11,8 @@
     **每次发送前比对代号**，变了就说明用户插话了 ⇒ 剩下的分段全部丢弃
   · 丢弃后把历史里那条 assistant 消息改写成"实际发出去的部分"，免得 bot
     "记得"自己说过没发出去的话（否则下一轮会引用用户根本没看到的内容）
+  · 发送收尾时补触发 `after_message_sent` 钩子 —— 消息链被清空了，核心的 respond 阶段
+    会在开头直接 return，会导致钩子根本走不到（见 `_fire_after_message_sent`）
 
 安全阀：出异常且**一段都没发出去**时，把消息链还原，交回核心按原样发送
 （宁可发得不优雅，也不要静默吞消息）。
@@ -30,6 +32,8 @@ from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import EventMessageType
 from astrbot.core.message.components import At, Image, Plain, Reply
+from astrbot.core.pipeline.context_utils import call_event_hook
+from astrbot.core.star.star_handler import EventType
 
 DEFAULT_REGEX = r"[^\n]+"  # 兜底：按行切（切分只认换行）
 ONLY_PUNCT_RE = re.compile(r"[。？！~…，、；：,.?!~\-—\s]+")  # 整段只有标点
@@ -747,6 +751,20 @@ class Main(star.Star):
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    async def _fire_after_message_sent(self, event: AstrMessageEvent) -> None:
+        """补触发 after_message_sent 钩子。
+
+        respond 阶段开头（`if not result.chain ...: return`）会在消息链为空时静默
+        return，链尾的 `call_event_hook(..., OnAfterMessageSentEvent)` 根本到不了。
+        该插件把链子清空后自己发，所以得在这里替核心把钩子补上；不补的话，
+        其它插件注册的收尾回调会被静默跳过（表现有可能是某些状态卡在中间态、只能等超时兜底）。
+        注入路径（提前 return 的那些轮次）不能调，否则会触发两次。
+        """
+        try:
+            await call_event_hook(event, EventType.OnAfterMessageSentEvent)
+        except Exception as exc:
+            logger.error("[pacer] 补触发 after_message_sent 失败: %s", exc)
+
     async def _send_segments(
         self,
         event: AstrMessageEvent,
@@ -794,5 +812,9 @@ class Main(star.Star):
                 event, user_text, full_text, sent, len(segs), my_gen
             )
         finally:
+            # ★ 补触发 after_message_sent：respond 阶段开头见 result.chain 为空就
+            # 直接 return（不打日志、也不触发该钩子），而链子已经被 clear 掉了。
+            # 接管了发送就得自己补上，否则会导致其它插件的收尾/清理回调永远不跑。
+            await self._fire_after_message_sent(event)
             # ★ 一轮到此收尾：解除「在飞」，并让 burst 把排队的那批立刻放出来
             self._round_end(umo, my_gen)
